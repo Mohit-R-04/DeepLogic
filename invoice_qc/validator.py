@@ -7,7 +7,19 @@ from .schemas import Invoice, ValidationResult, ValidationSummary
 
 # small settings
 ALLOWED_CURRENCIES = ["EUR", "USD", "INR"]
-TOTAL_TOLERANCE = 0.05  # max diff we allow because of rounding etc
+BASE_TOLERANCE = 0.05  # base small tolerance in money
+
+
+def _calc_tolerance(amount: float) -> float:
+    """
+    decide how much difference we allow.
+    for very small invoices use fixed 0.05,
+    for bigger ones allow about 1% difference.
+    this is kind of "relaxed" on purpose because extraction is rough.
+    """
+    if amount is None:
+        return BASE_TOLERANCE
+    return max(BASE_TOLERANCE, 0.01 * abs(amount))
 
 
 def _check_completeness(inv: Invoice) -> List[str]:
@@ -86,24 +98,31 @@ def _check_business_rules(inv: Invoice) -> List[str]:
         and inv.gross_total is not None
     ):
         expected_gross = inv.net_total + inv.tax_amount
+        tolerance = _calc_tolerance(inv.gross_total)
         diff = abs(expected_gross - inv.gross_total)
-        if diff > TOTAL_TOLERANCE:
+        if diff > tolerance:
             errors.append("business_rule_failed: totals_mismatch_net_tax_gross")
 
     # sum(line_total) ~ net_total
     if inv.line_items and inv.net_total is not None:
         line_sum = 0.0
-        has_any_line_total = False
+        line_total_count = 0
+
         for item in inv.line_items:
             if item.line_total is not None:
                 line_sum += item.line_total
-                has_any_line_total = True
+                line_total_count += 1
 
-        # only check if at least one line_total existed
-        if has_any_line_total:
+        # only check if at least half of the items have a line_total
+        if line_total_count > 0 and line_total_count >= len(inv.line_items) / 2:
+            tolerance = _calc_tolerance(inv.net_total)
             diff = abs(line_sum - inv.net_total)
-            if diff > TOTAL_TOLERANCE:
+            if diff > tolerance:
                 errors.append("business_rule_failed: line_total_sum_differs_from_net")
+        else:
+            # not enough data quality to compare sum vs net
+            # so we just skip this rule to avoid too many false errors
+            pass
 
     return errors
 

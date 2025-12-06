@@ -11,7 +11,6 @@ class LineItem(BaseModel):
     line_total: Optional[float] = None # total for this line
 
 
-
 class Invoice(BaseModel):
     # main invoice info, one per pdf / json
     invoice_id: Optional[str] = None      # invoice number

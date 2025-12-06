@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Invoice QC Console</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            margin: 20px;
+            background: #f4f4f4;
+        }
+
+        h1 {
+            font-size: 22px;
+        }
+
+        .box {
+            background: #ffffff;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+
+        label {
+            font-weight: 600;
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        input[type="text"],
+        textarea {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 8px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            font-family: monospace;
+            font-size: 13px;
+        }
+
+        button {
+            padding: 6px 12px;
+            margin-right: 6px;
+            border-radius: 4px;
+            border: 1px solid #333;
+            background: #333;
+            color: #fff;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+
+        .small {
+            font-size: 12px;
+            color: #555;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            font-size: 13px;
+            background: #fff;
+        }
+
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 6px 8px;
+            text-align: left;
+        }
+
+        th {
+            background: #f0f0f0;
+        }
+
+        .badge-valid {
+            background: #c9f7c9;
+            color: #1f7a1f;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+
+        .badge-invalid {
+            background: #ffd6d6;
+            color: #a11;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+
+        .error-chip {
+            display: inline-block;
+            background: #ffe9e9;
+            color: #a11;
+            padding: 2px 4px;
+            margin: 1px;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+
+        #summary {
+            font-size: 13px;
+            margin-top: 8px;
+        }
+
+        .filter-row {
+            margin-top: 8px;
+            font-size: 13px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Invoice QC Console (small demo)</h1>
+
+    <div class="box">
+        <label for="apiBase">API base URL</label>
+        <input id="apiBase" type="text" value="http://127.0.0.1:9001" />
+        <div class="small">
+            Change this if your FastAPI runs on different port.
+        </div>
+    </div>
+
+    <div class="box">
+        <h2 style="margin-top:0;">Validate JSON invoices</h2>
+        <div class="small">
+            Paste JSON array of invoices (same structure as extracted_invoices.json) and click validate.
+        </div>
+        <textarea id="jsonInput" rows="8"
+            placeholder='[ { "invoice_id": "TEST-1", "invoice_date": "2024-01-10", ... } ]'></textarea>
+        <button id="btnValidateJson">Validate JSON</button>
+        <span id="jsonStatus" class="small"></span>
+    </div>
+
+    <div class="box">
+        <h2 style="margin-top:0;">Upload PDFs (extract + validate)</h2>
+        <div class="small">
+            This calls POST /extract-and-validate-pdfs.
+        </div>
+        <input id="pdfFiles" type="file" multiple accept="application/pdf" />
+        <br />
+        <button id="btnUploadPdfs">Upload & Validate PDFs</button>
+        <span id="pdfStatus" class="small"></span>
+    </div>
+
+    <div class="box">
+        <h2 style="margin-top:0;">Results</h2>
+        <div class="filter-row">
+            <label>
+                <input type="checkbox" id="onlyInvalid" />
+                show only invalid invoices
+            </label>
+        </div>
+        <div id="summary"></div>
+        <div id="tableContainer"></div>
+    </div>
+
+    <script>
+        const apiBaseInput = document.getElementById("apiBase");
+        const jsonInput = document.getElementById("jsonInput");
+        const jsonStatus = document.getElementById("jsonStatus");
+        const pdfFilesInput = document.getElementById("pdfFiles");
+        const pdfStatus = document.getElementById("pdfStatus");
+        const btnValidateJson = document.getElementById("btnValidateJson");
+        const btnUploadPdfs = document.getElementById("btnUploadPdfs");
+        const summaryDiv = document.getElementById("summary");
+        const tableContainer = document.getElementById("tableContainer");
+        const onlyInvalidCheckbox = document.getElementById("onlyInvalid");
+
+        // we keep last results so we can filter without calling api again
+        let lastResults = null; // { summary, invoices } from /validate-json
+        let lastValidationFromPdf = null; // same structure from /extract-and-validate-pdfs
+
+        function getApiBase() {
+            return apiBaseInput.value.trim().replace(/\/+$/, "");
+        }
+
+        function setLoading(button, statusElem, msg) {
+            button.disabled = true;
+            if (statusElem) statusElem.textContent = msg || "working...";
+        }
+
+        function clearLoading(button, statusElem, msg) {
+            button.disabled = false;
+            if (statusElem) statusElem.textContent = msg || "";
+        }
+
+        function renderResults(data, source) {
+            // data: { summary, invoices }
+            lastResults = data;
+            lastValidationFromPdf = source === "pdf" ? data : lastValidationFromPdf;
+            const summary = data.summary;
+            const invoices = data.invoices || [];
+
+            const onlyInvalid = onlyInvalidCheckbox.checked;
+
+            // summary text
+            let text = "";
+            if (summary) {
+                text += `total: ${summary.total_invoices} | `;
+                text += `valid: ${summary.valid_invoices} | `;
+                text += `invalid: ${summary.invalid_invoices}`;
+            }
+            summaryDiv.textContent = text;
+
+            // build html table
+            if (!invoices.length) {
+                tableContainer.innerHTML = "<div class='small'>no invoices to show</div>";
+                return;
+            }
+
+            let rowsHtml = "";
+            invoices.forEach((inv) => {
+                if (onlyInvalid && inv.is_valid) {
+                    return;
+                }
+
+                const badge = inv.is_valid
+                    ? "<span class='badge-valid'>valid</span>"
+                    : "<span class='badge-invalid'>invalid</span>";
+
+                const errorsHtml = (inv.errors || [])
+                    .map((e) => `<span class="error-chip">${e}</span>`)
+                    .join(" ");
+
+                rowsHtml += `
+          <tr>
+            <td>${inv.invoice_id || "-"}</td>
+            <td>${badge}</td>
+            <td>${errorsHtml || "<span class='small'>no errors</span>"}</td>
+          </tr>
+        `;
+            });
+
+            if (!rowsHtml) {
+                rowsHtml = "<tr><td colspan='3'><span class='small'>no invoices match filter</span></td></tr>";
+            }
+
+            const tableHtml = `
+        <table>
+          <thead>
+            <tr>
+              <th>Invoice ID</th>
+              <th>Status</th>
+              <th>Errors</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowsHtml}
+          </tbody>
+        </table>
+      `;
+            tableContainer.innerHTML = tableHtml;
+        }
+
+        onlyInvalidCheckbox.addEventListener("change", () => {
+            // re-render using last results if available
+            if (lastResults) {
+                renderResults(lastResults, "json"); // or "pdf", doesn't matter
+            }
+        });
+
+        btnValidateJson.addEventListener("click", async () => {
+            let payloadText = jsonInput.value.trim();
+            if (!payloadText) {
+                jsonStatus.textContent = "please paste some JSON first";
+                return;
+            }
+
+            let parsed;
+            try {
+                parsed = JSON.parse(payloadText);
+            } catch (err) {
+                jsonStatus.textContent = "JSON parse error: " + err.message;
+                return;
+            }
+
+            setLoading(btnValidateJson, jsonStatus, "sending to /validate-json ...");
+            try {
+                const resp = await fetch(getApiBase() + "/validate-json", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(parsed),
+                });
+
+                if (!resp.ok) {
+                    const txt = await resp.text();
+                    jsonStatus.textContent = "API error " + resp.status + ": " + txt;
+                    btnValidateJson.disabled = false;
+                    return;
+                }
+
+                const data = await resp.json();
+                jsonStatus.textContent = "done";
+                renderResults(data, "json");
+            } catch (err) {
+                jsonStatus.textContent = "request failed: " + err.message;
+            } finally {
+                btnValidateJson.disabled = false;
+            }
+        });
+
+        btnUploadPdfs.addEventListener("click", async () => {
+            const files = pdfFilesInput.files;
+            if (!files || files.length === 0) {
+                pdfStatus.textContent = "please pick at least one pdf file";
+                return;
+            }
+
+            const form = new FormData();
+            for (let i = 0; i < files.length; i++) {
+                form.append("files", files[i]);
+            }
+
+            setLoading(btnUploadPdfs, pdfStatus, "uploading pdfs & validating ...");
+            try {
+                const resp = await fetch(getApiBase() + "/extract-and-validate-pdfs", {
+                    method: "POST",
+                    body: form,
+                });
+
+                if (!resp.ok) {
+                    const txt = await resp.text();
+                    pdfStatus.textContent = "API error " + resp.status + ": " + txt;
+                    btnUploadPdfs.disabled = false;
+                    return;
+                }
+
+                const data = await resp.json();
+                pdfStatus.textContent = "done";
+
+                // now backend returns { summary, invoices, raw }
+                if (data && data.summary && data.invoices) {
+                    renderResults(
+                        {
+                            summary: data.summary,
+                            invoices: data.invoices
+                        },
+                        "pdf"
+                    );
+                } else if (data && data.validation && data.validation.summary && data.validation.results) {
+                    // fallback if shape is { validation: { summary, results } }
+                    renderResults(
+                        {
+                            summary: data.validation.summary,
+                            invoices: data.validation.results
+                        },
+                        "pdf"
+                    );
+                } else {
+                    pdfStatus.textContent = "unexpected response structure";
+                }
+
+            } catch (err) {
+                pdfStatus.textContent = "request failed: " + err.message;
+            } finally {
+                btnUploadPdfs.disabled = false;
+            }
+        });
+    </script>
+</body>
+
+</html>
